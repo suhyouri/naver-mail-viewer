@@ -7,15 +7,6 @@ const nodemailer = require("nodemailer");
 
 const app = express();
 
-// CSP 헤더 설정 (Render 배포용)
-app.use((req, res, next) => {
-  res.setHeader(
-    "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;"
-  );
-  next();
-});
-
 app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 
@@ -188,14 +179,12 @@ function deleteEmail(email, password, uid) {
           return;
         }
 
-        // UID로 메일 찾아서 삭제 플래그 설정
         imap.addFlags(uid, ["\\Deleted"], (err) => {
           if (err) {
             reject(err);
             return;
           }
 
-          // 삭제된 메일 영구 제거
           imap.expunge((err) => {
             if (err) {
               reject(err);
@@ -230,7 +219,7 @@ async function sendEmail(from, password, userEmail, originalEmail) {
 
   const mailOptions = {
     from: from,
-    to: userEmail, // 사용자 이메일로 전송
+    to: userEmail,
     subject: `[전달] ${originalEmail.subject}`,
     text: `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -297,7 +286,6 @@ app.post("/api/send-email", async (req, res) => {
       });
     }
 
-    // 원본 메일 정보 가져오기
     const originalEmail = {
       from: req.body.originalFrom,
       subject: req.body.originalSubject,
@@ -305,10 +293,7 @@ app.post("/api/send-email", async (req, res) => {
       body: req.body.originalBody,
     };
 
-    // 1. 원본 메일을 사용자 이메일로 전송
     await sendEmail(from, password, userEmail, originalEmail);
-
-    // 2. 원본 메일 삭제
     await deleteEmail(from, password, uid);
 
     res.json({
@@ -695,7 +680,6 @@ app.get("/", (req, res) => {
             cursor: not-allowed;
         }
         
-        /* 삭제 애니메이션 */
         .email-circle.deleting {
             animation: fadeOut 0.5s forwards;
         }
@@ -744,7 +728,7 @@ app.get("/", (req, res) => {
         <div class="controls">
             <label for="limit">가져올 개수:</label>
             <input type="number" id="limit" value="10" min="1" max="50">
-            <button onclick="fetchEmails()" id="fetchBtn">🔄 메일 가져오기</button>
+            <button id="fetchBtn">🔄 메일 가져오기</button>
         </div>
         
         <div class="alert alert-error" id="errorAlert"></div>
@@ -762,14 +746,13 @@ app.get("/", (req, res) => {
         <div class="email-grid" id="emailGrid"></div>
     </div>
     
-    <!-- 간단한 이메일 입력 모달 -->
     <div id="emailModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
                 <h2>📧 메일 전달</h2>
-                <span class="close" onclick="closeModal()">&times;</span>
+                <span class="close" id="closeBtn">&times;</span>
             </div>
-            <form id="replyForm" onsubmit="sendReply(event)">
+            <form id="replyForm">
                 <div class="form-group">
                     <label for="userEmail">당신의 이메일을 입력해주세요.</label>
                     <input type="email" id="userEmail" placeholder="your_email@example.com" required>
@@ -782,298 +765,289 @@ app.get("/", (req, res) => {
                 <input type="hidden" id="originalDate">
                 <input type="hidden" id="originalBody">
                 <div class="modal-buttons">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal()">취소</button>
+                    <button type="button" class="btn btn-secondary" id="cancelBtn">취소</button>
                     <button type="submit" class="btn btn-primary" id="sendBtn">📤 내 이메일로 전달</button>
                 </div>
             </form>
         </div>
     </div>
     
-    <script>
-        let currentEmails = [];
-        
-        window.addEventListener('load', () => {
-            fetchEmails();
-        });
-        
-        async function fetchEmails() {
-            const limit = document.getElementById('limit').value;
-            const errorAlert = document.getElementById('errorAlert');
-            const successAlert = document.getElementById('successAlert');
-            const loading = document.getElementById('loading');
-            const emailGrid = document.getElementById('emailGrid');
-            const fetchBtn = document.getElementById('fetchBtn');
-            const badgeContainer = document.getElementById('badgeContainer');
-            
-            errorAlert.style.display = 'none';
-            successAlert.style.display = 'none';
-            emailGrid.style.display = 'none';
-            badgeContainer.style.display = 'none';
-            loading.style.display = 'block';
-            fetchBtn.disabled = true;
-            
-            try {
-                const response = await fetch('/api/fetch-emails?limit=' + limit);
-                const data = await response.json();
-                
-                if (!response.ok) {
-                    throw new Error(data.error || '메일을 가져오는데 실패했습니다.');
-                }
-                
-                if (data.emails && data.emails.length > 0) {
-                    currentEmails = data.emails;
-                    displayEmails(data.emails);
-                } else {
-                    errorAlert.textContent = '메일이 없습니다.';
-                    errorAlert.style.display = 'block';
-                }
-                
-            } catch (error) {
-                errorAlert.textContent = error.message;
-                errorAlert.style.display = 'block';
-            } finally {
-                loading.style.display = 'none';
-                fetchBtn.disabled = false;
-            }
-        }
-        
-        function displayEmails(emails) {
-            const emailGrid = document.getElementById('emailGrid');
-            const badgeContainer = document.getElementById('badgeContainer');
-            const emailCountBadge = document.getElementById('emailCountBadge');
-            
-            emailCountBadge.textContent = '📬 총 ' + emails.length + '개의 메일';
-            badgeContainer.style.display = 'block';
-            
-            // 기존 내용 초기화
-            emailGrid.innerHTML = '';
-            
-            // 각 메일을 DOM 요소로 생성
-            emails.forEach((email, index) => {
-                const fromName = extractName(email.from || '알 수 없음');
-                const subject = email.subject || '제목 없음';
-                const date = formatDate(email.date);
-                const body = email.body || '본문 없음';
-                
-                // div 요소 생성
-                const circle = document.createElement('div');
-                circle.className = 'email-circle';
-                circle.id = 'email-' + index;
-                circle.onclick = function() { openReplyModal(index); };
-                
-                // 번호
-                const numberDiv = document.createElement('div');
-                numberDiv.className = 'email-number';
-                numberDiv.textContent = index + 1;
-                
-                // 발신자
-                const fromDiv = document.createElement('div');
-                fromDiv.className = 'email-from';
-                fromDiv.textContent = fromName;
-                
-                // 제목
-                const subjectDiv = document.createElement('div');
-                subjectDiv.className = 'email-subject';
-                subjectDiv.textContent = subject;
-                
-                // 날짜
-                const dateDiv = document.createElement('div');
-                dateDiv.className = 'email-date';
-                dateDiv.textContent = date;
-                
-                // 미리보기
-                const previewDiv = document.createElement('div');
-                previewDiv.className = 'email-preview';
-                previewDiv.textContent = body;
-                
-                // 모두 조합
-                circle.appendChild(numberDiv);
-                circle.appendChild(fromDiv);
-                circle.appendChild(subjectDiv);
-                circle.appendChild(dateDiv);
-                circle.appendChild(previewDiv);
-                
-                emailGrid.appendChild(circle);
-            });
-            
-            emailGrid.style.display = 'grid';
-        }
-        
-        function openReplyModal(index) {
-            const email = currentEmails[index];
-            const modal = document.getElementById('emailModal');
-            const replyTo = document.getElementById('replyTo');
-            const userEmail = document.getElementById('userEmail');
-            const emailUid = document.getElementById('emailUid');
-            const emailIndex = document.getElementById('emailIndex');
-            const originalFrom = document.getElementById('originalFrom');
-            const originalSubject = document.getElementById('originalSubject');
-            const originalDate = document.getElementById('originalDate');
-            const originalBody = document.getElementById('originalBody');
-            
-            replyTo.value = email.fromEmail || extractEmailAddress(email.from);
-            emailUid.value = email.uid;
-            emailIndex.value = index;
-            userEmail.value = '';
-            
-            // 원본 메일 정보 저장
-            originalFrom.value = email.from;
-            originalSubject.value = email.subject;
-            originalDate.value = email.date;
-            originalBody.value = email.body;
-            
-            modal.style.display = 'block';
-        }
-        
-        function closeModal() {
-            const modal = document.getElementById('emailModal');
-            modal.style.display = 'none';
-        }
-        
-        window.onclick = function(event) {
-            const modal = document.getElementById('emailModal');
-            if (event.target == modal) {
-                closeModal();
-            }
-        }
-        
-        async function sendReply(event) {
-            event.preventDefault();
-            
-            const sendBtn = document.getElementById('sendBtn');
-            const errorAlert = document.getElementById('errorAlert');
-            const successAlert = document.getElementById('successAlert');
-            
-            const userEmail = document.getElementById('userEmail').value;
-            const uid = document.getElementById('emailUid').value;
-            const index = document.getElementById('emailIndex').value;
-            const originalFrom = document.getElementById('originalFrom').value;
-            const originalSubject = document.getElementById('originalSubject').value;
-            const originalDate = document.getElementById('originalDate').value;
-            const originalBody = document.getElementById('originalBody').value;
-            
-            errorAlert.style.display = 'none';
-            successAlert.style.display = 'none';
-            sendBtn.disabled = true;
-            sendBtn.textContent = '📤 전달 중...';
-            
-            try {
-                const response = await fetch('/api/send-email', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ 
-                        userEmail, 
-                        uid,
-                        emailIndex: index,
-                        originalFrom,
-                        originalSubject,
-                        originalDate,
-                        originalBody
-                    })
-                });
-                
-                const data = await response.json();
-                
-                if (!response.ok) {
-                    throw new Error(data.error || '처리에 실패했습니다.');
-                }
-                
-                // 메일 삭제 애니메이션
-                const emailElement = document.getElementById('email-' + index);
-                if (emailElement) {
-                    emailElement.classList.add('deleting');
-                    
-                    // 애니메이션 후 제거
-                    setTimeout(() => {
-                        emailElement.remove();
-                        
-                        // 메일 카운트 업데이트
-                        const remainingEmails = document.querySelectorAll('.email-circle').length;
-                        const emailCountBadge = document.getElementById('emailCountBadge');
-                        emailCountBadge.textContent = '📬 총 ' + remainingEmails + '개의 메일';
-                        
-                        if (remainingEmails === 0) {
-                            const emailGrid = document.getElementById('emailGrid');
-                            const badgeContainer = document.getElementById('badgeContainer');
-                            emailGrid.style.display = 'none';
-                            badgeContainer.style.display = 'none';
-                        }
-                    }, 500);
-                }
-                
-                successAlert.textContent = '✅ ' + userEmail + ' 로 메일이 전달되고 원본이 삭제되었습니다!';
-                successAlert.style.display = 'block';
-                
-                closeModal();
-                
-                setTimeout(() => {
-                    successAlert.style.display = 'none';
-                }, 5000);
-                
-            } catch (error) {
-                errorAlert.textContent = error.message;
-                errorAlert.style.display = 'block';
-            } finally {
-                sendBtn.disabled = false;
-                sendBtn.textContent = '📤 내 이메일로 전달';
-            }
-        }
-        
-        function extractName(from) {
-            const match = from.match(/"?([^"<]+)"?\s*<?/);
-            if (match && match[1]) {
-                return match[1].trim();
-            }
-            const emailMatch = from.match(/([^@<\s]+)@/);
-            if (emailMatch && emailMatch[1]) {
-                return emailMatch[1];
-            }
-            return from;
-        }
-        
-        function extractEmailAddress(from) {
-            const match = from.match(/<(.+?)>/) || from.match(/([^\s<>]+@[^\s<>]+)/);
-            return match ? match[1] : from;
-        }
-        
-        function formatDate(dateStr) {
-            if (!dateStr) return '';
-            try {
-                const date = new Date(dateStr);
-                const now = new Date();
-                const diff = now - date;
-                const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-                
-                if (days === 0) {
-                    const hours = Math.floor(diff / (1000 * 60 * 60));
-                    if (hours === 0) {
-                        const minutes = Math.floor(diff / (1000 * 60));
-                        return minutes + '분 전';
-                    }
-                    return hours + '시간 전';
-                } else if (days === 1) {
-                    return '어제';
-                } else if (days < 7) {
-                    return days + '일 전';
-                } else {
-                    return date.toLocaleDateString('ko-KR');
-                }
-            } catch (e) {
-                return dateStr;
-            }
-        }
-        
-        document.addEventListener('keydown', function(event) {
-            if (event.key === 'Escape') {
-                closeModal();
-            }
-        });
-    </script>
+    <script src="/app.js"></script>
 </body>
 </html>
     `);
+});
+
+// 자바스크립트 파일 제공
+app.get("/app.js", (req, res) => {
+  res.setHeader("Content-Type", "application/javascript");
+  res.send(`
+let currentEmails = [];
+
+window.addEventListener('load', function() {
+    fetchEmails();
+    setupEventListeners();
+});
+
+function setupEventListeners() {
+    document.getElementById('fetchBtn').addEventListener('click', fetchEmails);
+    document.getElementById('closeBtn').addEventListener('click', closeModal);
+    document.getElementById('cancelBtn').addEventListener('click', closeModal);
+    document.getElementById('replyForm').addEventListener('submit', sendReply);
+    
+    window.addEventListener('click', function(event) {
+        const modal = document.getElementById('emailModal');
+        if (event.target === modal) {
+            closeModal();
+        }
+    });
+    
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') {
+            closeModal();
+        }
+    });
+}
+
+async function fetchEmails() {
+    const limit = document.getElementById('limit').value;
+    const errorAlert = document.getElementById('errorAlert');
+    const successAlert = document.getElementById('successAlert');
+    const loading = document.getElementById('loading');
+    const emailGrid = document.getElementById('emailGrid');
+    const fetchBtn = document.getElementById('fetchBtn');
+    const badgeContainer = document.getElementById('badgeContainer');
+    
+    errorAlert.style.display = 'none';
+    successAlert.style.display = 'none';
+    emailGrid.style.display = 'none';
+    badgeContainer.style.display = 'none';
+    loading.style.display = 'block';
+    fetchBtn.disabled = true;
+    
+    try {
+        const response = await fetch('/api/fetch-emails?limit=' + limit);
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(data.error || '메일을 가져오는데 실패했습니다.');
+        }
+        
+        if (data.emails && data.emails.length > 0) {
+            currentEmails = data.emails;
+            displayEmails(data.emails);
+        } else {
+            errorAlert.textContent = '메일이 없습니다.';
+            errorAlert.style.display = 'block';
+        }
+        
+    } catch (error) {
+        errorAlert.textContent = error.message;
+        errorAlert.style.display = 'block';
+    } finally {
+        loading.style.display = 'none';
+        fetchBtn.disabled = false;
+    }
+}
+
+function displayEmails(emails) {
+    const emailGrid = document.getElementById('emailGrid');
+    const badgeContainer = document.getElementById('badgeContainer');
+    const emailCountBadge = document.getElementById('emailCountBadge');
+    
+    emailCountBadge.textContent = '📬 총 ' + emails.length + '개의 메일';
+    badgeContainer.style.display = 'block';
+    
+    emailGrid.innerHTML = '';
+    
+    emails.forEach(function(email, index) {
+        const fromName = extractName(email.from || '알 수 없음');
+        const subject = email.subject || '제목 없음';
+        const date = formatDate(email.date);
+        const body = email.body || '본문 없음';
+        
+        const circle = document.createElement('div');
+        circle.className = 'email-circle';
+        circle.id = 'email-' + index;
+        circle.addEventListener('click', function() {
+            openReplyModal(index);
+        });
+        
+        const numberDiv = document.createElement('div');
+        numberDiv.className = 'email-number';
+        numberDiv.textContent = index + 1;
+        
+        const fromDiv = document.createElement('div');
+        fromDiv.className = 'email-from';
+        fromDiv.textContent = fromName;
+        
+        const subjectDiv = document.createElement('div');
+        subjectDiv.className = 'email-subject';
+        subjectDiv.textContent = subject;
+        
+        const dateDiv = document.createElement('div');
+        dateDiv.className = 'email-date';
+        dateDiv.textContent = date;
+        
+        const previewDiv = document.createElement('div');
+        previewDiv.className = 'email-preview';
+        previewDiv.textContent = body;
+        
+        circle.appendChild(numberDiv);
+        circle.appendChild(fromDiv);
+        circle.appendChild(subjectDiv);
+        circle.appendChild(dateDiv);
+        circle.appendChild(previewDiv);
+        
+        emailGrid.appendChild(circle);
+    });
+    
+    emailGrid.style.display = 'grid';
+}
+
+function openReplyModal(index) {
+    const email = currentEmails[index];
+    const modal = document.getElementById('emailModal');
+    
+    document.getElementById('replyTo').value = email.fromEmail || extractEmailAddress(email.from);
+    document.getElementById('emailUid').value = email.uid;
+    document.getElementById('emailIndex').value = index;
+    document.getElementById('userEmail').value = '';
+    document.getElementById('originalFrom').value = email.from;
+    document.getElementById('originalSubject').value = email.subject;
+    document.getElementById('originalDate').value = email.date;
+    document.getElementById('originalBody').value = email.body;
+    
+    modal.style.display = 'block';
+}
+
+function closeModal() {
+    document.getElementById('emailModal').style.display = 'none';
+}
+
+async function sendReply(event) {
+    event.preventDefault();
+    
+    const sendBtn = document.getElementById('sendBtn');
+    const errorAlert = document.getElementById('errorAlert');
+    const successAlert = document.getElementById('successAlert');
+    
+    const userEmail = document.getElementById('userEmail').value;
+    const uid = document.getElementById('emailUid').value;
+    const index = document.getElementById('emailIndex').value;
+    const originalFrom = document.getElementById('originalFrom').value;
+    const originalSubject = document.getElementById('originalSubject').value;
+    const originalDate = document.getElementById('originalDate').value;
+    const originalBody = document.getElementById('originalBody').value;
+    
+    errorAlert.style.display = 'none';
+    successAlert.style.display = 'none';
+    sendBtn.disabled = true;
+    sendBtn.textContent = '📤 전달 중...';
+    
+    try {
+        const response = await fetch('/api/send-email', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ 
+                userEmail: userEmail, 
+                uid: uid,
+                emailIndex: index,
+                originalFrom: originalFrom,
+                originalSubject: originalSubject,
+                originalDate: originalDate,
+                originalBody: originalBody
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(data.error || '처리에 실패했습니다.');
+        }
+        
+        const emailElement = document.getElementById('email-' + index);
+        if (emailElement) {
+            emailElement.classList.add('deleting');
+            
+            setTimeout(function() {
+                emailElement.remove();
+                
+                const remainingEmails = document.querySelectorAll('.email-circle').length;
+                const emailCountBadge = document.getElementById('emailCountBadge');
+                emailCountBadge.textContent = '📬 총 ' + remainingEmails + '개의 메일';
+                
+                if (remainingEmails === 0) {
+                    document.getElementById('emailGrid').style.display = 'none';
+                    document.getElementById('badgeContainer').style.display = 'none';
+                }
+            }, 500);
+        }
+        
+        successAlert.textContent = '✅ ' + userEmail + ' 로 메일이 전달되고 원본이 삭제되었습니다!';
+        successAlert.style.display = 'block';
+        
+        closeModal();
+        
+        setTimeout(function() {
+            successAlert.style.display = 'none';
+        }, 5000);
+        
+    } catch (error) {
+        errorAlert.textContent = error.message;
+        errorAlert.style.display = 'block';
+    } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = '📤 내 이메일로 전달';
+    }
+}
+
+function extractName(from) {
+    const match = from.match(/"?([^"<]+)"?\s*<?/);
+    if (match && match[1]) {
+        return match[1].trim();
+    }
+    const emailMatch = from.match(/([^@<\s]+)@/);
+    if (emailMatch && emailMatch[1]) {
+        return emailMatch[1];
+    }
+    return from;
+}
+
+function extractEmailAddress(from) {
+    const match = from.match(/<(.+?)>/) || from.match(/([^\s<>]+@[^\s<>]+)/);
+    return match ? match[1] : from;
+}
+
+function formatDate(dateStr) {
+    if (!dateStr) return '';
+    try {
+        const date = new Date(dateStr);
+        const now = new Date();
+        const diff = now - date;
+        const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+        
+        if (days === 0) {
+            const hours = Math.floor(diff / (1000 * 60 * 60));
+            if (hours === 0) {
+                const minutes = Math.floor(diff / (1000 * 60));
+                return minutes + '분 전';
+            }
+            return hours + '시간 전';
+        } else if (days === 1) {
+            return '어제';
+        } else if (days < 7) {
+            return days + '일 전';
+        } else {
+            return date.toLocaleDateString('ko-KR');
+        }
+    } catch (e) {
+        return dateStr;
+    }
+}
+  `);
 });
 
 const PORT = process.env.PORT || 3000;
