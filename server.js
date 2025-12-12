@@ -206,21 +206,19 @@ function deleteEmail(email, password, uid) {
 }
 
 // 이메일 전송 (원본 메일 내용을 사용자에게 전달)
+// app.js의 sendEmail 함수를 이것으로 교체하세요
 async function sendEmail(from, password, userEmail, originalEmail) {
   const transporter = nodemailer.createTransport({
     host: "smtp.naver.com",
-    port: 465, // 587 -> 465로 변경
-    secure: true, // false -> true로 변경 (SSL 보안 접속 강제)
+    port: 465, // 기존 587에서 465로 변경 (중요!)
+    secure: true, // 기존 false에서 true로 변경 (SSL 보안 접속)
     auth: {
       user: from,
       pass: password,
     },
-    logger: true, // 로그 출력 켜기
-    debug: true, // 디버그 모드 켜기,
-    // 타임아웃 설정 추가 (무한 멈춤 방지)
-    connectionTimeout: 10000, // 10초
+    // 안정성을 위한 타임아웃 설정 추가
+    connectionTimeout: 10000,
     greetingTimeout: 10000,
-    socketTimeout: 10000,
   });
 
   const mailOptions = {
