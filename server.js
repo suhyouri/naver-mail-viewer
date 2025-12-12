@@ -209,12 +209,18 @@ function deleteEmail(email, password, uid) {
 async function sendEmail(from, password, userEmail, originalEmail) {
   const transporter = nodemailer.createTransport({
     host: "smtp.naver.com",
-    port: 587,
-    secure: false,
+    port: 465, // 587 -> 465로 변경
+    secure: true, // false -> true로 변경 (SSL 보안 접속 강제)
     auth: {
       user: from,
       pass: password,
     },
+    logger: true, // 로그 출력 켜기
+    debug: true, // 디버그 모드 켜기,
+    // 타임아웃 설정 추가 (무한 멈춤 방지)
+    connectionTimeout: 10000, // 10초
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
   });
 
   const mailOptions = {
