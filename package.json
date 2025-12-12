@@ -1,0 +1,30 @@
+{
+  "name": "naver-mail-viewer",
+  "version": "1.0.0",
+  "description": "네이버 메일을 IMAP으로 가져오는 Node.js 서버",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:env": "node server-with-env.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [
+    "naver",
+    "mail",
+    "imap",
+    "email"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "imap": "^0.8.19",
+    "mailparser": "^3.6.5",
+    "dotenv": "^16.3.1",
+    "express-rate-limit": "^7.1.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
