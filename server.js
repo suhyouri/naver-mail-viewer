@@ -3,37 +3,16 @@ const express = require("express");
 const cors = require("cors");
 const Imap = require("imap");
 const { simpleParser } = require("mailparser");
-const rateLimit = require("express-rate-limit");
+const nodemailer = require("nodemailer");
 
 const app = express();
 
-// CORS 설정
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",")
-  : ["http://localhost:3000"];
-
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
-  })
-);
-
+app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
-app.use(express.static("public"));
-
-// Rate Limiting
-const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
-});
-
-app.use("/api/", limiter);
 
 // 이메일 헤더 디코딩 함수
 function decodeHeader(header) {
   if (!header) return "";
-
   const decoded = header.replace(
     /=\?([^?]+)\?([BQ])\?([^?]+)\?=/gi,
     (match, charset, encoding, text) => {
@@ -52,8 +31,13 @@ function decodeHeader(header) {
       return match;
     }
   );
-
   return decoded;
+}
+
+// 이메일 주소 추출
+function extractEmail(from) {
+  const match = from.match(/<(.+?)>/) || from.match(/([^\s<>]+@[^\s<>]+)/);
+  return match ? match[1] : from;
 }
 
 // IMAP으로 이메일 가져오기
@@ -97,9 +81,11 @@ function fetchEmails(email, password, limit = 10) {
           const emailData = {
             seqno: seqno,
             from: "",
+            fromEmail: "",
             subject: "",
             date: "",
             body: "",
+            uid: null,
           };
 
           msg.on("body", (stream, info) => {
@@ -130,6 +116,7 @@ function fetchEmails(email, password, limit = 10) {
 
                     if (key === "from") {
                       emailData.from = decodeHeader(value);
+                      emailData.fromEmail = extractEmail(value);
                     } else if (key === "subject") {
                       emailData.subject = decodeHeader(value);
                     } else if (key === "date") {
@@ -139,6 +126,10 @@ function fetchEmails(email, password, limit = 10) {
                 });
               }
             });
+          });
+
+          msg.once("attributes", (attrs) => {
+            emailData.uid = attrs.uid;
           });
 
           msg.once("end", () => {
@@ -169,7 +160,94 @@ function fetchEmails(email, password, limit = 10) {
   });
 }
 
-// API 엔드포인트 - .env에서 자동으로 이메일/비밀번호 읽기
+// 이메일 삭제 함수
+function deleteEmail(email, password, uid) {
+  return new Promise((resolve, reject) => {
+    const imap = new Imap({
+      user: email,
+      password: password,
+      host: "imap.naver.com",
+      port: 993,
+      tls: true,
+      tlsOptions: { rejectUnauthorized: false },
+    });
+
+    imap.once("ready", () => {
+      imap.openBox("INBOX", false, (err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        // UID로 메일 찾아서 삭제 플래그 설정
+        imap.addFlags(uid, ["\\Deleted"], (err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+
+          // 삭제된 메일 영구 제거
+          imap.expunge((err) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve();
+            }
+            imap.end();
+          });
+        });
+      });
+    });
+
+    imap.once("error", (err) => {
+      reject(err);
+    });
+
+    imap.connect();
+  });
+}
+
+// 이메일 전송 (원본 메일 내용을 사용자에게 전달)
+async function sendEmail(from, password, userEmail, originalEmail) {
+  const transporter = nodemailer.createTransport({
+    host: "smtp.naver.com",
+    port: 587,
+    secure: false,
+    auth: {
+      user: from,
+      pass: password,
+    },
+  });
+
+  const mailOptions = {
+    from: from,
+    to: userEmail, // 사용자 이메일로 전송
+    subject: `[전달] ${originalEmail.subject}`,
+    text: `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📧 전달된 메일
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+보낸 사람: ${originalEmail.from}
+제목: ${originalEmail.subject}
+날짜: ${originalEmail.date}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+메일 내용:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+${originalEmail.body}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+이 메일은 자동으로 전달되었습니다.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    `,
+  };
+
+  return await transporter.sendMail(mailOptions);
+}
+
+// API: 메일 가져오기
 app.get("/api/fetch-emails", async (req, res) => {
   try {
     const email = process.env.TEST_EMAIL;
@@ -178,7 +256,7 @@ app.get("/api/fetch-emails", async (req, res) => {
 
     if (!email || !password) {
       return res.status(400).json({
-        error: ".env 파일에 TEST_EMAIL과 TEST_PASSWORD를 설정해주세요.",
+        error: "환경변수를 설정해주세요.",
       });
     }
 
@@ -191,35 +269,49 @@ app.get("/api/fetch-emails", async (req, res) => {
     });
   } catch (error) {
     console.error("Error:", error);
-
-    let errorMessage = "메일을 가져오는데 실패했습니다.";
-
-    if (error.message.includes("Invalid credentials")) {
-      errorMessage =
-        "로그인 실패: 이메일 또는 비밀번호가 올바르지 않습니다. IMAP 설정이 활성화되어 있는지 확인해주세요.";
-    } else if (
-      error.message.includes("ENOTFOUND") ||
-      error.message.includes("ETIMEDOUT")
-    ) {
-      errorMessage =
-        "네트워크 연결 오류: 네이버 메일 서버에 연결할 수 없습니다.";
-    }
-
     res.status(500).json({
-      error: errorMessage,
-      details:
-        process.env.NODE_ENV === "development" ? error.message : undefined,
+      error: "메일을 가져오는데 실패했습니다.",
     });
   }
 });
 
-// 헬스 체크 엔드포인트
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || "development",
-  });
+// API: 메일 전송 + 삭제
+app.post("/api/send-email", async (req, res) => {
+  try {
+    const { userEmail, uid, emailIndex } = req.body;
+    const from = process.env.TEST_EMAIL;
+    const password = process.env.TEST_PASSWORD;
+
+    if (!userEmail || !uid || emailIndex === undefined) {
+      return res.status(400).json({
+        error: "필수 정보가 누락되었습니다.",
+      });
+    }
+
+    // 원본 메일 정보 가져오기
+    const originalEmail = {
+      from: req.body.originalFrom,
+      subject: req.body.originalSubject,
+      date: req.body.originalDate,
+      body: req.body.originalBody,
+    };
+
+    // 1. 원본 메일을 사용자 이메일로 전송
+    await sendEmail(from, password, userEmail, originalEmail);
+
+    // 2. 원본 메일 삭제
+    await deleteEmail(from, password, uid);
+
+    res.json({
+      success: true,
+      message: "메일이 전달되었고 원본이 삭제되었습니다.",
+    });
+  } catch (error) {
+    console.error("Send/Delete error:", error);
+    res.status(500).json({
+      error: "처리에 실패했습니다.",
+    });
+  }
 });
 
 // 메인 페이지
@@ -320,6 +412,12 @@ app.get("/", (req, res) => {
             background: #f8d7da;
             color: #721c24;
             border: 1px solid #f5c6cb;
+        }
+        
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
         }
         
         .loading {
@@ -457,6 +555,153 @@ app.get("/", (req, res) => {
             display: none;
         }
         
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            animation: fadeIn 0.3s;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .modal-content {
+            background: white;
+            margin: 15% auto;
+            padding: 30px;
+            border-radius: 15px;
+            width: 90%;
+            max-width: 500px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            animation: slideIn 0.3s;
+        }
+        
+        @keyframes slideIn {
+            from {
+                transform: translateY(-50px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        .modal-header h2 {
+            color: #333;
+            font-size: 1.5em;
+        }
+        
+        .close {
+            color: #aaa;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.3s;
+        }
+        
+        .close:hover {
+            color: #000;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+            transition: border 0.3s;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .modal-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+        
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #e0e0e0;
+            color: #333;
+        }
+        
+        .btn-secondary:hover {
+            background: #d0d0d0;
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        /* 삭제 애니메이션 */
+        .email-circle.deleting {
+            animation: fadeOut 0.5s forwards;
+        }
+        
+        @keyframes fadeOut {
+            0% {
+                opacity: 1;
+                transform: scale(1);
+            }
+            100% {
+                opacity: 0;
+                transform: scale(0.8);
+            }
+        }
+        
         @media (max-width: 768px) {
             .email-grid {
                 grid-template-columns: 1fr;
@@ -472,6 +717,11 @@ app.get("/", (req, res) => {
             .controls {
                 flex-direction: column;
             }
+            
+            .modal-content {
+                width: 95%;
+                margin: 20% auto;
+            }
         }
     </style>
 </head>
@@ -479,7 +729,7 @@ app.get("/", (req, res) => {
     <div class="container">
         <div class="header">
             <h1>📧 네이버 메일 뷰어</h1>
-            <p>자동으로 메일을 가져옵니다</p>
+            <p>메일을 클릭하여 내 이메일로 전달받으세요 (자동 삭제)</p>
         </div>
         
         <div class="controls">
@@ -489,6 +739,7 @@ app.get("/", (req, res) => {
         </div>
         
         <div class="alert alert-error" id="errorAlert"></div>
+        <div class="alert alert-success" id="successAlert"></div>
         
         <div class="loading" id="loading">
             <div class="spinner"></div>
@@ -502,8 +753,36 @@ app.get("/", (req, res) => {
         <div class="email-grid" id="emailGrid"></div>
     </div>
     
+    <!-- 간단한 이메일 입력 모달 -->
+    <div id="emailModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>📧 메일 전달</h2>
+                <span class="close" onclick="closeModal()">&times;</span>
+            </div>
+            <form id="replyForm" onsubmit="sendReply(event)">
+                <div class="form-group">
+                    <label for="userEmail">당신의 이메일을 입력해주세요.</label>
+                    <input type="email" id="userEmail" placeholder="your_email@example.com" required>
+                </div>
+                <input type="hidden" id="replyTo">
+                <input type="hidden" id="emailUid">
+                <input type="hidden" id="emailIndex">
+                <input type="hidden" id="originalFrom">
+                <input type="hidden" id="originalSubject">
+                <input type="hidden" id="originalDate">
+                <input type="hidden" id="originalBody">
+                <div class="modal-buttons">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">취소</button>
+                    <button type="submit" class="btn btn-primary" id="sendBtn">📤 내 이메일로 전달</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
     <script>
-        // 페이지 로드 시 자동으로 메일 가져오기
+        let currentEmails = [];
+        
         window.addEventListener('load', () => {
             fetchEmails();
         });
@@ -511,12 +790,14 @@ app.get("/", (req, res) => {
         async function fetchEmails() {
             const limit = document.getElementById('limit').value;
             const errorAlert = document.getElementById('errorAlert');
+            const successAlert = document.getElementById('successAlert');
             const loading = document.getElementById('loading');
             const emailGrid = document.getElementById('emailGrid');
             const fetchBtn = document.getElementById('fetchBtn');
             const badgeContainer = document.getElementById('badgeContainer');
             
             errorAlert.style.display = 'none';
+            successAlert.style.display = 'none';
             emailGrid.style.display = 'none';
             badgeContainer.style.display = 'none';
             loading.style.display = 'block';
@@ -531,6 +812,7 @@ app.get("/", (req, res) => {
                 }
                 
                 if (data.emails && data.emails.length > 0) {
+                    currentEmails = data.emails;
                     displayEmails(data.emails);
                 } else {
                     errorAlert.textContent = '메일이 없습니다.';
@@ -563,7 +845,7 @@ app.get("/", (req, res) => {
                 const body = email.body || '본문 없음';
                 
                 html += \`
-                    <div class="email-circle">
+                    <div class="email-circle" id="email-\${index}" onclick="openReplyModal(\${index})">
                         <div class="email-number">\${index + 1}</div>
                         <div class="email-from">\${escapeHtml(fromName)}</div>
                         <div class="email-subject">\${escapeHtml(subject)}</div>
@@ -577,18 +859,143 @@ app.get("/", (req, res) => {
             emailGrid.style.display = 'grid';
         }
         
+        function openReplyModal(index) {
+            const email = currentEmails[index];
+            const modal = document.getElementById('emailModal');
+            const replyTo = document.getElementById('replyTo');
+            const userEmail = document.getElementById('userEmail');
+            const emailUid = document.getElementById('emailUid');
+            const emailIndex = document.getElementById('emailIndex');
+            const originalFrom = document.getElementById('originalFrom');
+            const originalSubject = document.getElementById('originalSubject');
+            const originalDate = document.getElementById('originalDate');
+            const originalBody = document.getElementById('originalBody');
+            
+            replyTo.value = email.fromEmail || extractEmailAddress(email.from);
+            emailUid.value = email.uid;
+            emailIndex.value = index;
+            userEmail.value = '';
+            
+            // 원본 메일 정보 저장
+            originalFrom.value = email.from;
+            originalSubject.value = email.subject;
+            originalDate.value = email.date;
+            originalBody.value = email.body;
+            
+            modal.style.display = 'block';
+        }
+        
+        function closeModal() {
+            const modal = document.getElementById('emailModal');
+            modal.style.display = 'none';
+        }
+        
+        window.onclick = function(event) {
+            const modal = document.getElementById('emailModal');
+            if (event.target == modal) {
+                closeModal();
+            }
+        }
+        
+        async function sendReply(event) {
+            event.preventDefault();
+            
+            const sendBtn = document.getElementById('sendBtn');
+            const errorAlert = document.getElementById('errorAlert');
+            const successAlert = document.getElementById('successAlert');
+            
+            const userEmail = document.getElementById('userEmail').value;
+            const uid = document.getElementById('emailUid').value;
+            const index = document.getElementById('emailIndex').value;
+            const originalFrom = document.getElementById('originalFrom').value;
+            const originalSubject = document.getElementById('originalSubject').value;
+            const originalDate = document.getElementById('originalDate').value;
+            const originalBody = document.getElementById('originalBody').value;
+            
+            errorAlert.style.display = 'none';
+            successAlert.style.display = 'none';
+            sendBtn.disabled = true;
+            sendBtn.textContent = '📤 전달 중...';
+            
+            try {
+                const response = await fetch('/api/send-email', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ 
+                        userEmail, 
+                        uid,
+                        emailIndex: index,
+                        originalFrom,
+                        originalSubject,
+                        originalDate,
+                        originalBody
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || '처리에 실패했습니다.');
+                }
+                
+                // 메일 삭제 애니메이션
+                const emailElement = document.getElementById('email-' + index);
+                if (emailElement) {
+                    emailElement.classList.add('deleting');
+                    
+                    // 애니메이션 후 제거
+                    setTimeout(() => {
+                        emailElement.remove();
+                        
+                        // 메일 카운트 업데이트
+                        const remainingEmails = document.querySelectorAll('.email-circle').length;
+                        const emailCountBadge = document.getElementById('emailCountBadge');
+                        emailCountBadge.textContent = '📬 총 ' + remainingEmails + '개의 메일';
+                        
+                        if (remainingEmails === 0) {
+                            const emailGrid = document.getElementById('emailGrid');
+                            const badgeContainer = document.getElementById('badgeContainer');
+                            emailGrid.style.display = 'none';
+                            badgeContainer.style.display = 'none';
+                        }
+                    }, 500);
+                }
+                
+                successAlert.textContent = '✅ ' + userEmail + ' 로 메일이 전달되고 원본이 삭제되었습니다!';
+                successAlert.style.display = 'block';
+                
+                closeModal();
+                
+                setTimeout(() => {
+                    successAlert.style.display = 'none';
+                }, 5000);
+                
+            } catch (error) {
+                errorAlert.textContent = error.message;
+                errorAlert.style.display = 'block';
+            } finally {
+                sendBtn.disabled = false;
+                sendBtn.textContent = '📤 내 이메일로 전달';
+            }
+        }
+        
         function extractName(from) {
-            // 이메일에서 이름만 추출
             const match = from.match(/"?([^"<]+)"?\s*<?/);
             if (match && match[1]) {
                 return match[1].trim();
             }
-            // 이메일 주소만 있는 경우 @ 앞부분 추출
             const emailMatch = from.match(/([^@<\s]+)@/);
             if (emailMatch && emailMatch[1]) {
                 return emailMatch[1];
             }
             return from;
+        }
+        
+        function extractEmailAddress(from) {
+            const match = from.match(/<(.+?)>/) || from.match(/([^\s<>]+@[^\s<>]+)/);
+            return match ? match[1] : from;
         }
         
         function formatDate(dateStr) {
@@ -623,6 +1030,12 @@ app.get("/", (req, res) => {
             div.textContent = text;
             return div.innerHTML;
         }
+        
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeModal();
+            }
+        });
     </script>
 </body>
 </html>
@@ -633,18 +1046,11 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`
 ╔═══════════════════════════════════════════════╗
-║                                               ║
-║   📧 네이버 메일 뷰어 서버가 시작되었습니다!   ║
-║                                               ║
+║   📧 네이버 메일 뷰어 + 자동 삭제            ║
 ║   🌐 http://localhost:${PORT}                  ║
-║   📝 Environment: ${process.env.NODE_ENV || "development"}           ║
-║                                               ║
+║   🗑️  제출 시 메일 자동 삭제                 ║
 ╚═══════════════════════════════════════════════╝
-
-✅ 준비 완료! 브라우저에서 위 주소로 접속하세요.
-
-📧 .env 파일 설정:
-   TEST_EMAIL=your_email@naver.com
-   TEST_PASSWORD=xxxx-xxxx-xxxx-xxxx
-    `);
+  `);
 });
+
+module.exports = app;
