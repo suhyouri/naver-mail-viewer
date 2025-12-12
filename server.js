@@ -7,6 +7,15 @@ const nodemailer = require("nodemailer");
 
 const app = express();
 
+// CSP 헤더 설정 (Render 배포용)
+app.use((req, res, next) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;"
+  );
+  next();
+});
+
 app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 
@@ -836,26 +845,57 @@ app.get("/", (req, res) => {
             emailCountBadge.textContent = '📬 총 ' + emails.length + '개의 메일';
             badgeContainer.style.display = 'block';
             
-            let html = '';
+            // 기존 내용 초기화
+            emailGrid.innerHTML = '';
             
+            // 각 메일을 DOM 요소로 생성
             emails.forEach((email, index) => {
                 const fromName = extractName(email.from || '알 수 없음');
                 const subject = email.subject || '제목 없음';
                 const date = formatDate(email.date);
                 const body = email.body || '본문 없음';
                 
-                html += \`
-                    <div class="email-circle" id="email-\${index}" onclick="openReplyModal(\${index})">
-                        <div class="email-number">\${index + 1}</div>
-                        <div class="email-from">\${escapeHtml(fromName)}</div>
-                        <div class="email-subject">\${escapeHtml(subject)}</div>
-                        <div class="email-date">\${escapeHtml(date)}</div>
-                        <div class="email-preview">\${escapeHtml(body)}</div>
-                    </div>
-                \`;
+                // div 요소 생성
+                const circle = document.createElement('div');
+                circle.className = 'email-circle';
+                circle.id = 'email-' + index;
+                circle.onclick = function() { openReplyModal(index); };
+                
+                // 번호
+                const numberDiv = document.createElement('div');
+                numberDiv.className = 'email-number';
+                numberDiv.textContent = index + 1;
+                
+                // 발신자
+                const fromDiv = document.createElement('div');
+                fromDiv.className = 'email-from';
+                fromDiv.textContent = fromName;
+                
+                // 제목
+                const subjectDiv = document.createElement('div');
+                subjectDiv.className = 'email-subject';
+                subjectDiv.textContent = subject;
+                
+                // 날짜
+                const dateDiv = document.createElement('div');
+                dateDiv.className = 'email-date';
+                dateDiv.textContent = date;
+                
+                // 미리보기
+                const previewDiv = document.createElement('div');
+                previewDiv.className = 'email-preview';
+                previewDiv.textContent = body;
+                
+                // 모두 조합
+                circle.appendChild(numberDiv);
+                circle.appendChild(fromDiv);
+                circle.appendChild(subjectDiv);
+                circle.appendChild(dateDiv);
+                circle.appendChild(previewDiv);
+                
+                emailGrid.appendChild(circle);
             });
             
-            emailGrid.innerHTML = html;
             emailGrid.style.display = 'grid';
         }
         
@@ -1023,12 +1063,6 @@ app.get("/", (req, res) => {
             } catch (e) {
                 return dateStr;
             }
-        }
-        
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
         }
         
         document.addEventListener('keydown', function(event) {
